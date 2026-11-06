@@ -147,6 +147,13 @@ Credentials are saved locally to `~/.config/mcp-is-muni/config.json`.
 
 ---
 
+## Contributing & Issues
+
+* **Issues & Bug Reports**: If you experience problems, unexpected behavior, or want to suggest new tool integrations, please open an issue in the [GitHub Issues tracker](https://github.com/davidskrecek/mcp-is-muni/issues).
+* **Pull Requests**: Direct commits to `main` are protected. All contributions must be submitted via pull requests and approved by the maintainer. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+---
+
 ## License
 
 MIT
