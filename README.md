@@ -24,6 +24,8 @@ Allows LLM assistants (Claude, Cursor, Antigravity, Windsurf) to access enrolled
 | **`search_is`** | `query` | Queries people, courses, documents, and publications across IS MU. |
 | **`get_study_progress_check`** | `study_id` _(optional)_ | Official degree audit check (*Kontrola průchodu studiem*). Reports status of all required course groups, completed/enrolled/missing courses. |
 | **`get_study_credit_summary`** | `study_id` _(optional)_ | Academic credit progress, earned credits per semester, currently enrolled credits, and remaining credits to graduate. |
+| **`get_registration_timeline`** | `term_id` _(optional)_ | Course registration opening waves, enrolment periods, and change dates across all faculties. |
+| **`browse_course_catalogue`** | `query`, `faculty`, `limit` | Searches and discovers elective (volitelné - category C) and selective courses across all university faculties. |
 
 ---
 

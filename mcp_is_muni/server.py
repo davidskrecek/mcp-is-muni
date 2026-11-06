@@ -208,6 +208,33 @@ def get_study_credit_summary(study_id: str = "") -> str:
     return json.dumps(summary, indent=2, ensure_ascii=False)
 
 
+@mcp.tool()
+def get_registration_timeline(term_id: str = "10383") -> str:
+    """
+    Retrieve course registration waves, enrolment periods, and change periods across all university faculties.
+    Displays student credit standing, registration shift, and exact opening dates.
+    
+    Args:
+        term_id: Term ID (default '10383' for Spring 2027; '10103' for Autumn 2026).
+    """
+    timeline = client.get_registration_timeline(term_id=term_id)
+    return json.dumps(timeline, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def browse_course_catalogue(query: str, faculty: str = "", limit: int = 25) -> str:
+    """
+    Search and discover elective (volitelné - category C) and selective courses across all university faculties.
+    
+    Args:
+        query: Search keywords (e.g. subject title, field, code prefix).
+        faculty: Optional faculty acronym (e.g. 'fi', 'fss', 'econ', 'phil', 'sci', 'law', 'med').
+        limit: Maximum results to return (default 25).
+    """
+    courses = client.browse_course_catalogue(query=query, faculty=faculty, limit=limit)
+    return json.dumps(courses, indent=2, ensure_ascii=False)
+
+
 def main():
     mcp.run()
 

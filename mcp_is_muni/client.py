@@ -819,3 +819,56 @@ class ISMuniClient:
             "credits_remaining_for_degree": max(0, 120 - (total_earned + total_enrolled)),
             "semesters": semesters,
         }
+
+    def get_registration_timeline(self, term_id: str = "10383") -> Dict[str, Any]:
+        """
+        Retrieves course registration waves, enrolment periods, and change periods across all faculties.
+        
+        Args:
+            term_id: Term ID (default '10383' for Spring 2027; '10103' for Autumn 2026).
+        """
+        study_id = self._discover_study_id()
+        url = f"/auth/student/zapis?obdobi={term_id};studium={study_id};lang=en"
+        resp = self.session.get(url)
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required for registration timeline.")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        posun_elem = soup.find(class_="rpa-obdobi-posun-info")
+        student_info = posun_elem.get_text(" | ", strip=True) if posun_elem else ""
+
+        faculties: List[Dict[str, str]] = []
+        for row in soup.find_all(class_=re.compile(r"rpa-obdobi-pruh", re.I)):
+            fac_elem = row.find(class_=re.compile(r"rpa-obdobi-fakulta", re.I))
+            if not fac_elem:
+                continue
+            fac_name = fac_elem.get_text(strip=True)
+
+            reg_el = row.find(class_=re.compile(r"rpa-obdobi-registrace", re.I))
+            zap_el = row.find(class_=re.compile(r"rpa-obdobi-zapis", re.I))
+            zme_el = row.find(class_=re.compile(r"rpa-obdobi-zmeny", re.I))
+
+            faculties.append({
+                "faculty": fac_name,
+                "registration": reg_el.get_text(" ", strip=True) if reg_el else "",
+                "enrolment": zap_el.get_text(" ", strip=True) if zap_el else "",
+                "changes": zme_el.get_text(" ", strip=True) if zme_el else "",
+            })
+
+        return {
+            "term_id": term_id,
+            "student_credit_status": student_info,
+            "faculties": faculties,
+        }
+
+    def browse_course_catalogue(self, query: str, faculty: str = "", limit: int = 25) -> List[Dict[str, Any]]:
+        """
+        Search and discover elective (volitelné - category C) and selective courses across all university faculties.
+        
+        Args:
+            query: Search keywords (e.g. topic, discipline, course code prefix).
+            faculty: Optional faculty acronym (e.g. 'fi', 'fss', 'econ', 'sci', 'phil', 'law', 'med').
+            limit: Maximum results to return (default 25).
+        """
+        q = f"{query} {faculty}".strip()
+        return self.search_is(q)[:limit]
