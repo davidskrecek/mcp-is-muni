@@ -48,7 +48,7 @@ Requires [`uv`](https://docs.astral.sh/uv/).
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/<username>/mcp-is-muni.git",
+        "git+https://github.com/davidskrecek/mcp-is-muni.git",
         "mcp-is-muni"
       ],
       "env": {
@@ -67,7 +67,7 @@ Requires [`uv`](https://docs.astral.sh/uv/).
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/<username>/mcp-is-muni.git",
+        "git+https://github.com/davidskrecek/mcp-is-muni.git",
         "mcp-is-muni"
       ]
     }
@@ -80,7 +80,7 @@ Requires [`uv`](https://docs.astral.sh/uv/).
 ### Option 2: Local Installation (Clone & Run)
 
 ```bash
-git clone https://github.com/<username>/mcp-is-muni.git
+git clone https://github.com/davidskrecek/mcp-is-muni.git
 cd mcp-is-muni
 uv run mcp-is-muni
 ```

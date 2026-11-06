@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    { name = "mcp-is-muni contributors" }
+    { name = "David Skřeček" }
 ]
 dependencies = [
     "fastmcp>=0.4.0",
