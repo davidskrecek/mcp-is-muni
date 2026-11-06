@@ -1,0 +1,629 @@
+"""
+IS MU (Masaryk University Information System) HTTP Client
+Provides high-level methods to fetch and parse student agendas, courses,
+study materials, syllabi, timetables, and homework vaults from is.muni.cz.
+"""
+
+import os
+import json
+import logging
+import io
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin, quote
+
+import httpx
+from bs4 import BeautifulSoup
+import pypdf
+
+logger = logging.getLogger("mcp_is_muni.client")
+
+def get_config_dir() -> Path:
+    """Return standard platform configuration directory."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return Path(xdg) / "mcp-is-muni"
+    return Path.home() / ".config" / "mcp-is-muni"
+
+CONFIG_DIR = get_config_dir()
+CONFIG_FILE = CONFIG_DIR / "config.json"
+BASE_URL = "https://is.muni.cz"
+
+
+class ISMuniClient:
+    def __init__(self, cookies: Optional[Dict[str, str]] = None):
+        transport = httpx.HTTPTransport(retries=3)
+        self.session = httpx.Client(
+            transport=transport,
+            base_url=BASE_URL,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9,cs;q=0.8",
+            },
+            follow_redirects=True,
+            timeout=30.0,
+        )
+        self.cookies_loaded = False
+        if cookies:
+            self.session.cookies.update(cookies)
+            self.cookies_loaded = True
+        else:
+            self.load_stored_credentials()
+
+    def parse_cookie_input(self, cookie_input: str) -> Dict[str, str]:
+        """Parse cookie string, JSON array, or plain cookie header into a dict."""
+        cookie_input = cookie_input.strip()
+        parsed: Dict[str, str] = {}
+
+        if cookie_input.startswith("[") or cookie_input.startswith("{"):
+            try:
+                data = json.loads(cookie_input)
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and "name" in item and "value" in item:
+                            parsed[item["name"]] = item["value"]
+                    return parsed
+                elif isinstance(data, dict):
+                    return {str(k): str(v) for k, v in data.items()}
+            except Exception:
+                pass
+
+        pairs = [p.strip() for p in cookie_input.split(";") if p.strip()]
+        for p in pairs:
+            if "=" in p:
+                k, v = p.split("=", 1)
+                parsed[k.strip()] = v.strip()
+            else:
+                parsed["__Host-issession"] = p.strip()
+
+        return parsed
+
+    def load_stored_credentials(self) -> bool:
+        """Load session credentials from env or config file."""
+        env_cookie = os.environ.get("IS_MUNI_COOKIE")
+        if env_cookie:
+            cookies = self.parse_cookie_input(env_cookie)
+            self.session.cookies.update(cookies)
+            self.cookies_loaded = True
+            return True
+
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cookies = cfg.get("cookies", {})
+                if isinstance(cookies, dict) and cookies:
+                    self.session.cookies.update(cookies)
+                    self.cookies_loaded = True
+                    return True
+                elif isinstance(cookies, str) and cookies:
+                    parsed = self.parse_cookie_input(cookies)
+                    self.session.cookies.update(parsed)
+                    self.cookies_loaded = True
+                    return True
+            except Exception as e:
+                logger.warning(f"Failed to read config file {CONFIG_FILE}: {e}")
+
+        return False
+
+    def save_credentials(self, cookies: Dict[str, str]) -> None:
+        """Save cookies to config file."""
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump({"cookies": cookies}, f, indent=2)
+        self.session.cookies.update(cookies)
+        self.cookies_loaded = True
+
+    def check_auth_status(self) -> Dict[str, Any]:
+        """
+        Verify if the client is authenticated with IS MU.
+        Returns student identity info if valid, or instructions if unauthenticated.
+        """
+        try:
+            resp = self.session.get("/auth/student/?lang=en")
+            final_url = str(resp.url)
+
+            if "muni.islogin.cz" in final_url or "/login" in final_url or resp.status_code in (401, 403):
+                return {
+                    "authenticated": False,
+                    "message": (
+                        "Not authenticated with IS MU. Session cookie is missing or expired. "
+                        "Call tool `set_session_cookies` with your cookie string from is.muni.cz "
+                        "(containing `__Host-issession` and `__Host-iscreds`)."
+                    ),
+                    "redirect_url": final_url,
+                }
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            student_name = ""
+            uco = ""
+
+            user_elem = soup.find(id="identita") or soup.find("div", class_="identita") or soup.find(class_="user-info")
+            if user_elem:
+                text = user_elem.get_text(" ", strip=True)
+                uco_match = re.search(r"(\d{5,7})", text)
+                if uco_match:
+                    uco = uco_match.group(1)
+                student_name = text.split(",")[0].strip()
+
+            if not student_name:
+                h1 = soup.find("h1")
+                if h1:
+                    student_name = h1.get_text(strip=True)
+
+            sem_elem = soup.find("select", attrs={"name": "obdobi"}) or soup.find(id="obdobi")
+            current_semester = sem_elem.find("option", selected=True).get_text(strip=True) if sem_elem else "Current"
+
+            return {
+                "authenticated": True,
+                "student_name": student_name,
+                "uco": uco,
+                "current_semester": current_semester,
+                "url": final_url,
+            }
+        except Exception as e:
+            return {
+                "authenticated": False,
+                "error": str(e),
+                "message": "Failed to connect to https://is.muni.cz",
+            }
+
+    def get_enrolled_courses(self, semester: str = "") -> List[Dict[str, Any]]:
+        """
+        Scrapes enrolled courses for the student from /auth/student/?lang=en.
+        """
+        url = "/auth/student/?lang=en"
+        if semester:
+            url += f"&obdobi={quote(semester)}"
+
+        resp = self.session.get(url)
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required. Set active IS MU session cookie.")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        courses: List[Dict[str, Any]] = []
+
+        course_links = soup.find_all("a", href=re.compile(r"/auth/predmet[y]?/|#"))
+        seen_codes = set()
+
+        for a in course_links:
+            text = a.get_text(" ", strip=True)
+            href = a.get("href", "")
+
+            code_match = re.search(r"\b([A-Z0-9]{2,8}[a-z]?)\b", text)
+            if not code_match:
+                code_match = re.search(r"/([A-Za-z0-9_]{3,10})\??", href)
+            if not code_match:
+                continue
+
+            course_code = code_match.group(1).upper()
+            if course_code in seen_codes or len(course_code) < 3 or course_code in ("PREDMET", "STUDENT", "PREDMETY", "COURSES"):
+                continue
+            seen_codes.add(course_code)
+
+            container = a.find_parent(["div", "li", "tr", "p"])
+            context_text = container.get_text(" ", strip=True) if container else text
+
+            materials_link = ""
+            mat_a = container.find("a", href=re.compile(r"rfmgr\.pl|/um/|/el/")) if container else None
+            if mat_a:
+                materials_link = urljoin(BASE_URL, mat_a.get("href", ""))
+
+            syllabus_link = ""
+            syl_a = container.find("a", href=re.compile(r"index\.qrich|osnova")) if container else None
+            if syl_a:
+                syllabus_link = urljoin(BASE_URL, syl_a.get("href", ""))
+
+            vault_link = ""
+            v_a = container.find("a", href=re.compile(r"odevzdavarny")) if container else None
+            if v_a:
+                vault_link = urljoin(BASE_URL, v_a.get("href", ""))
+
+            courses.append({
+                "code": course_code,
+                "name": text,
+                "course_url": urljoin(BASE_URL, href) if href != "#" else f"/predmety/predmet?kod={course_code}&lang=en",
+                "summary": context_text,
+                "materials_url": materials_link,
+                "interactive_syllabus_url": syllabus_link,
+                "homework_vault_url": vault_link,
+            })
+
+        return courses
+
+    def get_course_details(self, course_code: str, faculty: str = "", semester: str = "") -> Dict[str, Any]:
+        """
+        Fetches full course syllabus, timetable, teachers, and completion requirements.
+        Tries authenticated endpoint first, falls back to public course catalogue.
+        """
+        course_code = course_code.strip().upper()
+        urls_to_try = []
+
+        if faculty and semester:
+            urls_to_try.append(f"/auth/predmet/{faculty.lower()}/{semester}/{course_code}?lang=en")
+            urls_to_try.append(f"/course/{faculty.lower()}/{semester}/{course_code}?lang=en")
+
+        urls_to_try.append(f"/auth/predmety/predmet?kod={course_code}&lang=en")
+        urls_to_try.append(f"/predmety/predmet?kod={course_code}&lang=en")
+
+        soup = None
+        target_url = ""
+        for u in urls_to_try:
+            try:
+                resp = self.session.get(u)
+                if resp.status_code == 200 and "muni.islogin.cz" not in str(resp.url):
+                    s = BeautifulSoup(resp.text, "html.parser")
+                    title_elem = s.find("h1") or s.find("title")
+                    if title_elem and course_code in title_elem.get_text():
+                        soup = s
+                        target_url = str(resp.url)
+                        break
+            except Exception:
+                continue
+
+        if not soup:
+            search_resp = self.session.get(f"/auth/vyhledavani/?search={course_code}&lang=en")
+            s = BeautifulSoup(search_resp.text, "html.parser")
+            found_a = s.find("a", href=re.compile(rf"/predmet.*/{course_code}|/course/.*/{course_code}", re.IGNORECASE))
+            if found_a:
+                resp = self.session.get(found_a["href"])
+                soup = BeautifulSoup(resp.text, "html.parser")
+                target_url = str(resp.url)
+
+        if not soup:
+            raise FileNotFoundError(f"Course {course_code} not found.")
+
+        title = soup.find("h1").get_text(strip=True) if soup.find("h1") else course_code
+        course_info: Dict[str, Any] = {
+            "code": course_code,
+            "title": title,
+            "url": target_url,
+            "attributes": {},
+            "sections": {},
+        }
+
+        for dt in soup.find_all("dt"):
+            dd = dt.find_next_sibling("dd")
+            key = dt.get_text(" ", strip=True).rstrip(":")
+            val = dd.get_text(" ", strip=True) if dd else ""
+            if key and val:
+                course_info["attributes"][key] = val
+
+        for h in soup.find_all(["h2", "h3"]):
+            header_text = h.get_text(" ", strip=True)
+            if not header_text or header_text in ("Navigation", "Other applications"):
+                continue
+
+            content_parts = []
+            curr = h.find_next_sibling()
+            while curr and curr.name not in ["h2", "h3"]:
+                text = curr.get_text("\n", strip=True)
+                if text:
+                    content_parts.append(text)
+                curr = curr.find_next_sibling()
+
+            if content_parts:
+                course_info["sections"][header_text] = "\n\n".join(content_parts)
+
+        return course_info
+
+    def list_study_materials(self, course_code: str, folder_path: str = "") -> Dict[str, Any]:
+        """
+        Lists study materials and folders for a given course.
+        """
+        course_code = course_code.strip().upper()
+        materials_url = f"/auth/dok/rfmgr.pl?furl=%2Fel%2Ffi%2Fcurrent%2F{course_code}%2Fum%2F&lang=en"
+
+        try:
+            courses = self.get_enrolled_courses()
+            matched = next((c for c in courses if c["code"] == course_code), None)
+            if matched and matched.get("materials_url"):
+                materials_url = matched["materials_url"]
+        except Exception:
+            pass
+
+        if folder_path:
+            materials_url = urljoin(materials_url, folder_path)
+
+        resp = self.session.get(materials_url)
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required to access course study materials.")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        items: List[Dict[str, Any]] = []
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            text = a.get_text(strip=True)
+
+            if not text or href.startswith("javascript:") or href.startswith("#"):
+                continue
+
+            full_link = urljoin(str(resp.url), href)
+            is_folder = "rfmgr.pl" in href or href.endswith("/")
+            is_file = any(href.lower().split("?")[0].endswith(ext) for ext in [".pdf", ".zip", ".ipynb", ".py", ".c", ".java", ".txt", ".docx", ".pptx", ".html"])
+
+            if is_folder or is_file or "/el/" in href or "/dok/" in href:
+                parent_row = a.find_parent("tr")
+                meta_info = parent_row.get_text(" | ", strip=True) if parent_row else text
+
+                items.append({
+                    "name": text,
+                    "url": full_link,
+                    "type": "folder" if is_folder else "file",
+                    "details": meta_info,
+                })
+
+        return {
+            "course_code": course_code,
+            "base_url": str(resp.url),
+            "items": items,
+        }
+
+    def read_study_material(self, url: str, max_pages: int = 15, max_chars: int = 25000) -> Dict[str, Any]:
+        """
+        Downloads and extracts textual content from a study material (PDF, HTML, code, or TXT).
+        """
+        full_url = urljoin(BASE_URL, url)
+        resp = self.session.get(full_url)
+
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required to read this material.")
+
+        content_type = resp.headers.get("content-type", "").lower()
+
+        if "application/pdf" in content_type or full_url.lower().split("?")[0].endswith(".pdf"):
+            reader = pypdf.PdfReader(io.BytesIO(resp.content))
+            total_pages = len(reader.pages)
+            pages_to_read = min(total_pages, max_pages)
+
+            extracted_text = []
+            char_count = 0
+            for i in range(pages_to_read):
+                p_text = reader.pages[i].extract_text() or ""
+                extracted_text.append(f"--- Page {i + 1} / {total_pages} ---\n{p_text}")
+                char_count += len(p_text)
+                if char_count >= max_chars:
+                    extracted_text.append(f"\n[Truncated after page {i + 1} due to character limit]")
+                    break
+
+            return {
+                "url": full_url,
+                "type": "pdf",
+                "total_pages": total_pages,
+                "pages_read": pages_to_read,
+                "text": "\n\n".join(extracted_text)[:max_chars],
+            }
+
+        elif any(t in content_type for t in ["text/html", "application/xhtml+xml"]):
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for tag in soup(["script", "style", "nav", "footer", "header"]):
+                tag.decompose()
+            clean_text = soup.get_text("\n", strip=True)
+            return {
+                "url": full_url,
+                "type": "html",
+                "text": clean_text[:max_chars],
+                "truncated": len(clean_text) > max_chars,
+            }
+
+        else:
+            text = resp.text
+            return {
+                "url": full_url,
+                "type": "text",
+                "text": text[:max_chars],
+                "truncated": len(text) > max_chars,
+            }
+
+    def get_interactive_syllabus(self, course_code: str, faculty: str = "", semester: str = "") -> Dict[str, Any]:
+        """
+        Fetches interactive syllabus (interaktivní osnova) week-by-week topic breakdown.
+        """
+        course_code = course_code.strip().upper()
+        syllabus_url = f"/auth/el/fi/current/{course_code}/index.qrich?lang=en"
+
+        try:
+            courses = self.get_enrolled_courses()
+            matched = next((c for c in courses if c["code"] == course_code), None)
+            if matched and matched.get("interactive_syllabus_url"):
+                syllabus_url = matched["interactive_syllabus_url"]
+            elif faculty and semester:
+                syllabus_url = f"/auth/el/{faculty.lower()}/{semester}/{course_code}/index.qrich?lang=en"
+        except Exception:
+            pass
+
+        resp = self.session.get(syllabus_url)
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required for interactive syllabus.")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        weeks_or_topics: List[Dict[str, Any]] = []
+
+        blocks = soup.find_all(class_=re.compile(r"osnov|blok|tyden|week", re.IGNORECASE))
+        if not blocks:
+            blocks = soup.find_all(["h2", "h3"])
+
+        for b in blocks:
+            title = b.get_text(" ", strip=True)
+            if not title:
+                continue
+            links = []
+            for a in b.find_all("a", href=True):
+                links.append({"text": a.get_text(strip=True), "url": urljoin(str(resp.url), a["href"])})
+            weeks_or_topics.append({
+                "title": title,
+                "links": links,
+            })
+
+        body_text = soup.get_text("\n", strip=True)
+        return {
+            "course_code": course_code,
+            "syllabus_url": str(resp.url),
+            "topics": weeks_or_topics,
+            "full_content_preview": body_text[:8000],
+        }
+
+    def get_homework_vaults(self, course_code: str) -> List[Dict[str, Any]]:
+        """
+        Retrieves homework vaults (odevzdávárny) and assignment deadlines.
+        """
+        course_code = course_code.strip().upper()
+        vault_url = f"/auth/el/fi/current/{course_code}/odevzdavarny/?lang=en"
+
+        try:
+            courses = self.get_enrolled_courses()
+            matched = next((c for c in courses if c["code"] == course_code), None)
+            if matched and matched.get("homework_vault_url"):
+                vault_url = matched["homework_vault_url"]
+        except Exception:
+            pass
+
+        resp = self.session.get(vault_url)
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required for homework vaults.")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        vaults: List[Dict[str, Any]] = []
+
+        for row in soup.find_all("tr"):
+            a = row.find("a", href=True)
+            if not a:
+                continue
+            name = a.get_text(strip=True)
+            full_link = urljoin(str(resp.url), a["href"])
+            row_text = row.get_text(" | ", strip=True)
+            vaults.append({
+                "name": name,
+                "url": full_link,
+                "details": row_text,
+            })
+
+        return vaults
+
+    def get_timetable(self) -> List[Dict[str, Any]]:
+        """
+        Fetches student schedule / timetable from /auth/student/rozvrh?lang=en.
+        """
+        resp = self.session.get("/auth/student/rozvrh?lang=en")
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required for timetable.")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        schedule: List[Dict[str, Any]] = []
+
+        events = soup.find_all(class_=re.compile(r"blok|udalost|rozvrh-bunka|item", re.IGNORECASE))
+        for ev in events:
+            txt = ev.get_text(" ", strip=True)
+            if txt:
+                schedule.append({"details": txt})
+
+        for tr in soup.find_all("tr"):
+            day_th = tr.find(["th", "td"], class_=re.compile(r"den|day", re.IGNORECASE))
+            if day_th:
+                day_name = day_th.get_text(strip=True)
+                items = [td.get_text(" ", strip=True) for td in tr.find_all("td") if td.get_text(strip=True)]
+                if items:
+                    schedule.append({"day": day_name, "items": items})
+
+        return schedule
+
+    def get_grades_and_notebooks(self, course_code: str = "") -> List[Dict[str, Any]]:
+        """
+        Fetches evaluation notebooks (poznámkové bloky) and points.
+        """
+        resp = self.session.get("/auth/student/poznamkove_bloky?lang=en")
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required for notebooks.")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results: List[Dict[str, Any]] = []
+
+        tables = soup.find_all("table")
+        for tbl in tables:
+            rows = tbl.find_all("tr")
+            for r in rows:
+                text = r.get_text(" | ", strip=True)
+                if not text:
+                    continue
+                if not course_code or course_code.upper() in text.upper():
+                    results.append({"evaluation": text})
+
+        return results
+
+    def get_student_notices(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Fetches notices and announcements from student noticeboard.
+        """
+        resp = self.session.get("/auth/student/nastenka?lang=en")
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required for noticeboard.")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        notices: List[Dict[str, Any]] = []
+
+        items = soup.find_all(class_=re.compile(r"zprava|prispevek|notice|post", re.IGNORECASE))
+        if not items:
+            items = soup.find_all(["article", "li"])
+
+        for it in items[:limit]:
+            title_elem = it.find(["h2", "h3", "h4", "strong", "a"])
+            title = title_elem.get_text(strip=True) if title_elem else "Notice"
+            body = it.get_text(" ", strip=True)
+            if len(body) > 10:
+                notices.append({"title": title, "content": body[:1000]})
+
+        return notices
+
+    def search_is(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Executes search in IS MU across people, courses, and documents.
+        Supports both authenticated (/auth/vyhledavani/) and public (/vyhledavani/) interfaces.
+        """
+        endpoint = "/auth/vyhledavani/" if self.cookies_loaded else "/vyhledavani/"
+        url = f"{endpoint}?search={quote(query)}&lang=en"
+
+        resp = self.session.get(url)
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            resp = self.session.get(f"/vyhledavani/?search={quote(query)}&lang=en")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results: List[Dict[str, Any]] = []
+        seen_urls = set()
+
+        for li in soup.find_all(["li", "div"], class_=re.compile(r"vysledek|result|polozka", re.IGNORECASE)):
+            a = li.find("a", href=True)
+            if not a:
+                continue
+            link = urljoin(BASE_URL, a["href"])
+            if link in seen_urls:
+                continue
+            seen_urls.add(link)
+            results.append({
+                "title": a.get_text(strip=True),
+                "url": link,
+                "snippet": li.get_text(" ", strip=True)[:400],
+            })
+
+        if not results:
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if any(x in href for x in ["/course/", "/predmet", "/dok/", "/lide/", "/auth/"]):
+                    link = urljoin(BASE_URL, href)
+                    if link in seen_urls:
+                        continue
+                    seen_urls.add(link)
+                    parent = a.find_parent(["p", "div", "li", "td"])
+                    snippet = parent.get_text(" ", strip=True) if parent else a.get_text(strip=True)
+                    results.append({
+                        "title": a.get_text(strip=True),
+                        "url": link,
+                        "snippet": snippet[:400],
+                    })
+
+        return results[:25]

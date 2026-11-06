@@ -1,0 +1,32 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Build and Distribution
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# IDE & Editor configs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local configuration & credentials
+config.json
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
