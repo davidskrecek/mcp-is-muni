@@ -235,6 +235,44 @@ def browse_course_catalogue(query: str, faculty: str = "", limit: int = 25) -> s
     return json.dumps(courses, indent=2, ensure_ascii=False)
 
 
+@mcp.tool()
+def get_exam_dates(term_id: str = "", study_id: str = "") -> str:
+    """
+    Retrieve upcoming examination dates, midterm test slots, enrolled reservations, capacities, and deadlines.
+    
+    Args:
+        term_id: Optional semester term ID (e.g. '10103' for Autumn 2026). Defaults to active semester.
+        study_id: Optional student study ID (e.g. '1234567'). Auto-discovered if omitted.
+    """
+    exam_data = client.get_exam_dates(term_id=term_id, study_id=study_id)
+    return json.dumps(exam_data, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def get_student_emails(folder: str = "inbox", limit: int = 25) -> str:
+    """
+    Retrieve message list from university email (/auth/mail/), including read/unread flags, sender, date, and subject.
+    
+    Args:
+        folder: Folder name ('inbox', 'sent', 'spam', 'trash', 'archive') or custom folder ID.
+        limit: Maximum messages to retrieve (default 25).
+    """
+    emails = client.get_student_emails(folder=folder, limit=limit)
+    return json.dumps(emails, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def read_email_message(mail_id: str) -> str:
+    """
+    Read full email message headers, sender, recipients, date, subject, body, and download link.
+    
+    Args:
+        mail_id: Message identifier (e.g. '388608368').
+    """
+    msg = client.read_email_message(mail_id=mail_id)
+    return json.dumps(msg, indent=2, ensure_ascii=False)
+
+
 def main():
     mcp.run()
 

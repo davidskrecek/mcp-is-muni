@@ -872,3 +872,283 @@ class ISMuniClient:
         """
         q = f"{query} {faculty}".strip()
         return self.search_is(q)[:limit]
+
+    def get_exam_dates(self, term_id: str = "", study_id: str = "") -> Dict[str, Any]:
+        """
+        Retrieves examination dates, midterm test slots, enrolled reservations, capacities, and deadlines.
+        
+        Args:
+            term_id: Optional term ID (e.g. '10103' for Autumn 2026). Uses active semester if empty.
+            study_id: Optional study ID (e.g. '1234567'). Auto-discovered if empty.
+        """
+        url = "/auth/student/prihl_na_zkousky?lang=en"
+        params = []
+        if term_id:
+            params.append(f"obdobi={term_id}")
+        if study_id:
+            params.append(f"studium={study_id}")
+        if params:
+            url += ";" + ";".join(params)
+
+        resp = self.session.get(url)
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required for examination dates.")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # 1. Reserved slots
+        reserved_slots: List[Dict[str, Any]] = []
+        for table in soup.find_all("table", class_="data1"):
+            rows = table.find_all("tr")
+            for i in range(0, len(rows), 2):
+                r_head = rows[i]
+                course_series = r_head.get_text(strip=True)
+                if i + 1 < len(rows):
+                    r_detail = rows[i + 1]
+                    detail_link = r_detail.find("a", href=lambda h: h and "zkt=" in h)
+                    zkt_match = re.search(r"zkt=(\d+)", detail_link["href"]) if detail_link else None
+                    zkt_id = zkt_match.group(1) if zkt_match else ""
+
+                    tds = r_detail.find_all("td")
+                    if len(tds) >= 2:
+                        info_td = tds[1]
+                        b_tag = info_td.find("b")
+                        datetime_room = b_tag.get_text(strip=True) if b_tag else ""
+                        full_text = info_td.get_text(" \n ", strip=True)
+
+                        res_match = re.search(r"reservations:\s*(\d+),\s*max\.\s*(\d+)", full_text)
+                        reservations = int(res_match.group(1)) if res_match else None
+                        max_capacity = int(res_match.group(2)) if res_match else None
+
+                        open_match = re.search(r"open for reservations from\s+([^\n]+)", full_text)
+                        open_date = open_match.group(1).strip() if open_match else ""
+
+                        note = ""
+                        for f in info_td.find_all("font"):
+                            f_txt = f.get_text(strip=True)
+                            if (
+                                not f_txt.startswith("open for")
+                                and not f_txt.startswith("Posted:")
+                                and "cancel" not in f_txt.lower()
+                                and "swap" not in f_txt.lower()
+                            ):
+                                note = f_txt
+                                break
+
+                        course_code_match = re.match(r"([A-Z0-9]{4,8})\b", course_series)
+                        course_code = course_code_match.group(1) if course_code_match else ""
+
+                        reserved_slots.append({
+                            "slot_id": zkt_id,
+                            "course_code": course_code,
+                            "course_series": course_series,
+                            "datetime_room": datetime_room,
+                            "reservations": reservations,
+                            "max_capacity": max_capacity,
+                            "open_for_reservations": open_date,
+                            "note": note,
+                            "can_cancel": bool(r_detail.find("a", class_="odhlaseni")),
+                        })
+
+        # 2. Upcoming series & dates
+        series_list: List[Dict[str, Any]] = []
+        for a in soup.find_all("a", href=lambda h: h and "serie=" in h and "odhlasit" not in h):
+            href = a["href"]
+            series_title = a.get_text(strip=True)
+            predmet_match = re.search(r"predmet=(\d+)", href)
+            serie_match = re.search(r"serie=(\d+)", href)
+            predmet_id = predmet_match.group(1) if predmet_match else ""
+            serie_id = serie_match.group(1) if serie_match else ""
+
+            series_url = href
+            if series_url.startswith("."):
+                series_url = "/auth/student" + series_url[1:]
+
+            s_resp = self.session.get(series_url)
+            s_soup = BeautifulSoup(s_resp.text, "html.parser")
+            slots: List[Dict[str, Any]] = []
+            s_table = s_soup.find("table", class_="data1")
+            if s_table:
+                for s_tr in s_table.find_all("tr", valign="top"):
+                    s_tds = s_tr.find_all("td")
+                    if len(s_tds) >= 3:
+                        st_enroll = s_tds[0].get_text(" ", strip=True)
+                        s_detail_link = s_tds[1].find("a", href=lambda h: h and "zkt=" in h)
+                        s_zkt_match = re.search(r"zkt=(\d+)", s_detail_link["href"]) if s_detail_link else None
+                        s_zkt_id = s_zkt_match.group(1) if s_zkt_match else ""
+
+                        s_info_td = s_tds[2]
+                        s_b = s_info_td.find("b")
+                        s_dt_room = s_b.get_text(strip=True) if s_b else ""
+                        s_full_text = s_info_td.get_text(" \n ", strip=True)
+
+                        s_res_match = re.search(r"reservations:\s*(\d+),\s*max\.\s*(\d+)", s_full_text)
+                        s_res = int(s_res_match.group(1)) if s_res_match else None
+                        s_max = int(s_res_match.group(2)) if s_res_match else None
+
+                        s_open_match = re.search(r"open for reservations from\s+([^\n]+)", s_full_text)
+                        s_open = s_open_match.group(1).strip() if s_open_match else ""
+
+                        s_note = ""
+                        for f in s_info_td.find_all("font"):
+                            f_txt = f.get_text(strip=True)
+                            if (
+                                not f_txt.startswith("open for")
+                                and not f_txt.startswith("Posted:")
+                                and "attempt to" not in f_txt
+                                and "swap at" not in f_txt
+                            ):
+                                s_note = f_txt
+                                break
+
+                        slots.append({
+                            "slot_id": s_zkt_id,
+                            "status": st_enroll,
+                            "datetime_room": s_dt_room,
+                            "reservations": s_res,
+                            "max_capacity": s_max,
+                            "open_for_reservations": s_open,
+                            "note": s_note,
+                        })
+
+            course_code_match = re.match(r"([A-Z0-9]{4,8})\b", series_title)
+            series_list.append({
+                "course_code": course_code_match.group(1) if course_code_match else "",
+                "series_title": series_title,
+                "predmet_id": predmet_id,
+                "serie_id": serie_id,
+                "slots": slots,
+            })
+
+        # 3. Courses without dates
+        no_exam_courses: List[str] = []
+        for t in soup.find_all("table", class_="navodek"):
+            if "no examination date has been posted" in t.get_text():
+                ul = t.find_next_sibling("ul")
+                if ul:
+                    no_exam_courses = [item.strip() for item in re.findall(r"<li>\s*([^<\n]+)", str(ul)) if item.strip()]
+
+        return {
+            "reserved_slots": reserved_slots,
+            "upcoming_series": series_list,
+            "courses_without_exam_dates": no_exam_courses,
+        }
+
+    def get_student_emails(self, folder: str = "inbox", limit: int = 25) -> Dict[str, Any]:
+        """
+        Retrieves list of student emails from university webmail (/auth/mail/).
+        
+        Args:
+            folder: Target folder name ('inbox', 'sent', 'spam', 'trash', 'archive') or custom folder_id.
+            limit: Maximum messages to retrieve (default 25).
+        """
+        folder_map = {
+            "inbox": "1560343",
+            "sent": "1564947",
+            "odeslana": "1564947",
+            "spam": "1604035",
+            "trash": "1606193",
+            "kos": "1606193",
+            "archive": "1560603",
+            "archiv": "1560603",
+        }
+        fid = folder_map.get(folder.lower(), folder)
+        url = f"/auth/mail/?lang=en;folder_id={fid};count={limit}"
+        resp = self.session.get(url)
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required for university email.")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        messages: List[Dict[str, Any]] = []
+        for r in soup.find_all("tr", id=lambda x: x and x.startswith("mail_")):
+            mail_id = r["id"].replace("mail_", "")
+            is_unread = "riadok_new" in r.get("class", [])
+
+            from_col = r.find(id=f"from_id_{mail_id}")
+            from_adr = from_col.get("data-from_adr") if from_col else ""
+
+            sender_name = r.find(id=f"span_from_adr_{mail_id}") or r.find(id=f"span_from_uco_{mail_id}")
+            sender = sender_name.get_text(strip=True) if sender_name else ""
+
+            subj_link = r.find(id=f"read_link_{mail_id}")
+            subject = subj_link.get_text(strip=True) if subj_link else ""
+
+            cols = r.find_all("td")
+            date = cols[5].get_text(strip=True) if len(cols) > 5 else ""
+            size = cols[6].get_text(strip=True) if len(cols) > 6 else ""
+
+            messages.append({
+                "id": mail_id,
+                "is_unread": is_unread,
+                "sender": sender,
+                "sender_address": from_adr,
+                "subject": subject,
+                "date": date,
+                "size": size,
+            })
+            if len(messages) >= limit:
+                break
+
+        return {
+            "folder": folder,
+            "folder_id": fid,
+            "count": len(messages),
+            "messages": messages,
+        }
+
+    def read_email_message(self, mail_id: str) -> Dict[str, Any]:
+        """
+        Reads full body, headers, and metadata of a specific university email message.
+        
+        Args:
+            mail_id: Unique message identifier (e.g. '388608368').
+        """
+        import html
+        resp = self.session.post(
+            "/auth/mail/mail_ajax?lang=en",
+            data={"akce": "read_mail", "mail_list": mail_id},
+        )
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required for university email.")
+
+        soup_xml = BeautifulSoup(resp.text, "xml")
+        html_node = soup_xml.find("html")
+        if not html_node:
+            raise ValueError(f"Message {mail_id} could not be loaded or was deleted.")
+
+        raw_html = html.unescape(html_node.text)
+        soup = BeautifulSoup(raw_html, "html.parser")
+
+        header_div = soup.find("div", class_="mailHeaders")
+        sender = ""
+        recipients = ""
+        date = ""
+        subject = ""
+
+        if header_div:
+            for line in header_div.get_text("\n", strip=True).splitlines():
+                line_str = line.strip()
+                if line_str.startswith("From:"):
+                    sender = line_str.replace("From:", "").replace("add to contacts", "").strip()
+                elif line_str.startswith("To:"):
+                    recipients = line_str.replace("To:", "").strip()
+                elif line_str.startswith("Date:"):
+                    date = line_str.replace("Date:", "").strip()
+                elif line_str.startswith("Subject:"):
+                    subject = line_str.replace("Subject:", "").strip()
+
+        body_div = soup.find("div", class_="mB_zprava")
+        body_text = body_div.get_text("\n", strip=True) if body_div else ""
+
+        dl_link = soup.find("a", id=lambda x: x and x.startswith("download_"))
+        download_url = dl_link["href"] if dl_link else ""
+
+        return {
+            "mail_id": mail_id,
+            "sender": sender,
+            "recipients": recipients,
+            "date": date,
+            "subject": subject,
+            "body": body_text,
+            "download_url": download_url,
+        }

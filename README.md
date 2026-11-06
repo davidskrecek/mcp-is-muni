@@ -26,6 +26,9 @@ Allows LLM assistants (Claude, Cursor, Antigravity, Windsurf) to access enrolled
 | **`get_study_credit_summary`** | `study_id` _(optional)_ | Academic credit progress, earned credits per semester, currently enrolled credits, and remaining credits to graduate. |
 | **`get_registration_timeline`** | `term_id` _(optional)_ | Course registration opening waves, enrolment periods, and change dates across all faculties. |
 | **`browse_course_catalogue`** | `query`, `faculty`, `limit` | Searches and discovers elective (volitelné - category C) and selective courses across all university faculties. |
+| **`get_exam_dates`** | `term_id` _(optional)_, `study_id` _(optional)_ | Upcoming examination dates, midterm test slots, enrolled reservations, capacities, and deadlines. |
+| **`get_student_emails`** | `folder` _(optional)_, `limit` _(optional)_ | Lists university email messages (`/auth/mail/`) with unread flags, sender, date, and subject. |
+| **`read_email_message`** | `mail_id` | Full email reading: message headers, sender, recipients, date, subject, body, and download link. |
 
 ---
 
