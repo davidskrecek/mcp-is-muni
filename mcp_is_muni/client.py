@@ -54,6 +54,24 @@ class ISMuniClient:
         else:
             self.load_stored_credentials()
 
+    def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Execute HTTP request with automated backoff retry for connection drops and rate pacing."""
+        import time
+        max_attempts = 4
+        for attempt in range(max_attempts):
+            try:
+                return self.session.request(method, url, **kwargs)
+            except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError):
+                if attempt == max_attempts - 1:
+                    raise
+                time.sleep(0.4 * (attempt + 1))
+
+    def _get(self, url: str, **kwargs) -> httpx.Response:
+        return self._request("GET", url, **kwargs)
+
+    def _post(self, url: str, **kwargs) -> httpx.Response:
+        return self._request("POST", url, **kwargs)
+
     def parse_cookie_input(self, cookie_input: str) -> Dict[str, str]:
         """Parse cookie string, JSON array, or plain cookie header into a dict."""
         cookie_input = cookie_input.strip()
@@ -124,7 +142,7 @@ class ISMuniClient:
         Returns student identity info if valid, or instructions if unauthenticated.
         """
         try:
-            resp = self.session.get("/auth/student/?lang=en")
+            resp = self._get("/auth/student/?lang=en")
             final_url = str(resp.url)
 
             if "muni.islogin.cz" in final_url or "/login" in final_url or resp.status_code in (401, 403):
@@ -181,7 +199,7 @@ class ISMuniClient:
         if semester:
             url += f"&obdobi={quote(semester)}"
 
-        resp = self.session.get(url)
+        resp = self._get(url)
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
             raise PermissionError("Authentication required. Set active IS MU session cookie.")
 
@@ -255,7 +273,7 @@ class ISMuniClient:
         target_url = ""
         for u in urls_to_try:
             try:
-                resp = self.session.get(u)
+                resp = self._get(u)
                 if resp.status_code == 200 and "muni.islogin.cz" not in str(resp.url):
                     s = BeautifulSoup(resp.text, "html.parser")
                     title_elem = s.find("h1") or s.find("title")
@@ -267,11 +285,11 @@ class ISMuniClient:
                 continue
 
         if not soup:
-            search_resp = self.session.get(f"/auth/vyhledavani/?search={course_code}&lang=en")
+            search_resp = self._get(f"/auth/vyhledavani/?search={course_code}&lang=en")
             s = BeautifulSoup(search_resp.text, "html.parser")
             found_a = s.find("a", href=re.compile(rf"/predmet.*/{course_code}|/course/.*/{course_code}", re.IGNORECASE))
             if found_a:
-                resp = self.session.get(found_a["href"])
+                resp = self._get(found_a["href"])
                 soup = BeautifulSoup(resp.text, "html.parser")
                 target_url = str(resp.url)
 
@@ -330,7 +348,7 @@ class ISMuniClient:
         if folder_path:
             materials_url = urljoin(materials_url, folder_path)
 
-        resp = self.session.get(materials_url)
+        resp = self._get(materials_url)
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
             raise PermissionError("Authentication required to access course study materials.")
 
@@ -370,7 +388,7 @@ class ISMuniClient:
         Downloads and extracts textual content from a study material (PDF, HTML, code, or TXT).
         """
         full_url = urljoin(BASE_URL, url)
-        resp = self.session.get(full_url)
+        resp = self._get(full_url)
 
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
             raise PermissionError("Authentication required to read this material.")
@@ -438,7 +456,7 @@ class ISMuniClient:
         except Exception:
             pass
 
-        resp = self.session.get(syllabus_url)
+        resp = self._get(syllabus_url)
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
             raise PermissionError("Authentication required for interactive syllabus.")
 
@@ -484,7 +502,7 @@ class ISMuniClient:
         except Exception:
             pass
 
-        resp = self.session.get(vault_url)
+        resp = self._get(vault_url)
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
             raise PermissionError("Authentication required for homework vaults.")
 
@@ -510,7 +528,7 @@ class ISMuniClient:
         """
         Fetches student schedule / timetable from /auth/student/rozvrh?lang=en.
         """
-        resp = self.session.get("/auth/student/rozvrh?lang=en")
+        resp = self._get("/auth/student/rozvrh?lang=en")
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
             raise PermissionError("Authentication required for timetable.")
 
@@ -537,7 +555,7 @@ class ISMuniClient:
         """
         Fetches evaluation notebooks (poznámkové bloky) and points.
         """
-        resp = self.session.get("/auth/student/poznamkove_bloky?lang=en")
+        resp = self._get("/auth/student/poznamkove_bloky?lang=en")
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
             raise PermissionError("Authentication required for notebooks.")
 
@@ -560,7 +578,7 @@ class ISMuniClient:
         """
         Fetches notices and announcements from student noticeboard.
         """
-        resp = self.session.get("/auth/student/nastenka?lang=en")
+        resp = self._get("/auth/student/nastenka?lang=en")
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
             raise PermissionError("Authentication required for noticeboard.")
 
@@ -588,9 +606,9 @@ class ISMuniClient:
         endpoint = "/auth/vyhledavani/" if self.cookies_loaded else "/vyhledavani/"
         url = f"{endpoint}?search={quote(query)}&lang=en"
 
-        resp = self.session.get(url)
+        resp = self._get(url)
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
-            resp = self.session.get(f"/vyhledavani/?search={quote(query)}&lang=en")
+            resp = self._get(f"/vyhledavani/?search={quote(query)}&lang=en")
 
         soup = BeautifulSoup(resp.text, "html.parser")
         results: List[Dict[str, Any]] = []
@@ -630,7 +648,7 @@ class ISMuniClient:
 
     def _discover_study_id(self) -> str:
         """Find active study ID from student portal."""
-        r = self.session.get("/auth/student/?lang=en")
+        r = self._get("/auth/student/?lang=en")
         m = re.search(r"studium=(\d+)", r.text)
         return m.group(1) if m else ""
 
@@ -645,7 +663,7 @@ class ISMuniClient:
             raise ValueError("Could not determine student study ID (studium).")
 
         form_url = f"/auth/student/moje_kontrola_studia?studium={study_id};lang=en"
-        r_form = self.session.get(form_url)
+        r_form = self._get(form_url)
         if "login" in str(r_form.url) or "muni.islogin.cz" in str(r_form.url):
             raise PermissionError("Authentication required for study progress check.")
 
@@ -667,7 +685,7 @@ class ISMuniClient:
                 "sabprokon_tl": "Check my studies",
             }
 
-        r_post = self.session.post(form_url, data=post_data)
+        r_post = self._post(form_url, data=post_data)
         soup_res = BeautifulSoup(r_post.text, "html.parser")
 
         # Find the monitoring template results block
@@ -760,7 +778,7 @@ class ISMuniClient:
             raise ValueError("Could not determine student study ID (studium).")
 
         url = f"/auth/student/moje_znamky?studium={study_id};vsob=1;lang=en"
-        resp = self.session.get(url)
+        resp = self._get(url)
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
             raise PermissionError("Authentication required for grades and credit summary.")
 
@@ -829,7 +847,7 @@ class ISMuniClient:
         """
         study_id = self._discover_study_id()
         url = f"/auth/student/zapis?obdobi={term_id};studium={study_id};lang=en"
-        resp = self.session.get(url)
+        resp = self._get(url)
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
             raise PermissionError("Authentication required for registration timeline.")
 
@@ -890,7 +908,7 @@ class ISMuniClient:
         if params:
             url += ";" + ";".join(params)
 
-        resp = self.session.get(url)
+        resp = self._get(url)
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
             raise PermissionError("Authentication required for examination dates.")
 
@@ -964,7 +982,7 @@ class ISMuniClient:
             if series_url.startswith("."):
                 series_url = "/auth/student" + series_url[1:]
 
-            s_resp = self.session.get(series_url)
+            s_resp = self._get(series_url)
             s_soup = BeautifulSoup(s_resp.text, "html.parser")
             slots: List[Dict[str, Any]] = []
             s_table = s_soup.find("table", class_="data1")
@@ -1054,7 +1072,7 @@ class ISMuniClient:
         }
         fid = folder_map.get(folder.lower(), folder)
         url = f"/auth/mail/?lang=en;folder_id={fid};count={limit}"
-        resp = self.session.get(url)
+        resp = self._get(url)
         if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
             raise PermissionError("Authentication required for university email.")
 
@@ -1104,7 +1122,7 @@ class ISMuniClient:
             mail_id: Unique message identifier (e.g. '388608368').
         """
         import html
-        resp = self.session.post(
+        resp = self._post(
             "/auth/mail/mail_ajax?lang=en",
             data={"akce": "read_mail", "mail_list": mail_id},
         )
