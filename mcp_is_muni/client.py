@@ -487,40 +487,51 @@ class ISMuniClient:
             "full_content_preview": body_text[:8000],
         }
 
-    def get_homework_vaults(self, course_code: str) -> List[Dict[str, Any]]:
+    def get_homework_vaults(self, course_code: str, semester: str = "podzim2026", faculty: str = "fi") -> List[Dict[str, Any]]:
         """
-        Retrieves homework vaults (odevzdávárny) and assignment deadlines.
+        Retrieves homework vaults (odevzdávárny) and assignment folders for a course.
+        
+        Args:
+            course_code: Course code (e.g. 'PA103', 'PV281', 'PV179').
+            semester: Semester slug (default 'podzim2026').
+            faculty: Faculty slug (default 'fi').
         """
-        course_code = course_code.strip().upper()
-        vault_url = f"/auth/el/fi/current/{course_code}/odevzdavarny/?lang=en"
+        code = course_code.strip().upper()
+        urls_to_try = [
+            f"/auth/el/{faculty}/{semester}/{code}/ode/?lang=en",
+            f"/auth/el/1433/{semester}/{code}/ode/?lang=en",
+            f"/auth/el/fi/current/{code}/ode/?lang=en",
+        ]
 
-        try:
-            courses = self.get_enrolled_courses()
-            matched = next((c for c in courses if c["code"] == course_code), None)
-            if matched and matched.get("homework_vault_url"):
-                vault_url = matched["homework_vault_url"]
-        except Exception:
-            pass
+        resp = None
+        for u in urls_to_try:
+            r = self._get(u)
+            if r.status_code == 200 and "login" not in str(r.url) and "muni.islogin.cz" not in str(r.url):
+                resp = r
+                break
 
-        resp = self._get(vault_url)
-        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
-            raise PermissionError("Authentication required for homework vaults.")
+        if not resp:
+            return []
 
         soup = BeautifulSoup(resp.text, "html.parser")
         vaults: List[Dict[str, Any]] = []
+        content = soup.find(id="app_content") or soup
 
-        for row in soup.find_all("tr"):
-            a = row.find("a", href=True)
-            if not a:
+        for a in content.find_all("a", href=lambda h: h and "/ode/" in h and h != "./"):
+            href = a["href"]
+            title = a.get_text(strip=True)
+            if not title or title.startswith("http") or title in ["to study materials", "go to course", "to Study Materials"]:
                 continue
-            name = a.get_text(strip=True)
-            full_link = urljoin(str(resp.url), a["href"])
-            row_text = row.get_text(" | ", strip=True)
-            vaults.append({
-                "name": name,
-                "url": full_link,
-                "details": row_text,
-            })
+            full_url = urljoin(str(resp.url), href)
+            parent = a.find_parent("div") or a.find_parent("tr") or a.find_parent("li")
+            desc = parent.get_text(" | ", strip=True) if parent else ""
+
+            if not any(v["url"] == full_url for v in vaults):
+                vaults.append({
+                    "name": title,
+                    "url": full_url,
+                    "details": desc,
+                })
 
         return vaults
 
@@ -1169,4 +1180,204 @@ class ISMuniClient:
             "subject": subject,
             "body": body_text,
             "download_url": download_url,
+        }
+
+    def submit_homework_file(
+        self,
+        vault_url_or_path: str,
+        file_path: str,
+        display_name: str = "",
+        description: str = "",
+        overwrite: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Uploads and submits a file into a homework vault (odevzdávárna) or IS file manager folder.
+        
+        Args:
+            vault_url_or_path: Target folder URL or relative path (e.g. '/auth/el/fi/podzim2026/PA103/ode/design_patterns/').
+            file_path: Local filesystem path to the file to be uploaded.
+            display_name: Optional custom title/name of the file in IS MU (defaults to basename).
+            description: Optional note/comment for the uploaded submission.
+            overwrite: If True ('pr'), overwrites existing file with same name. If False ('er'), reports collision error.
+        """
+        import mimetypes
+        from urllib.parse import urlparse
+
+        path = Path(file_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Local file does not exist: {file_path}")
+
+        filename = path.name
+        title = display_name.strip() or filename
+        mime_type, _ = mimetypes.guess_type(str(path))
+        if not mime_type:
+            mime_type = "application/octet-stream"
+
+        file_bytes = path.read_bytes()
+
+        parsed = urlparse(vault_url_or_path)
+        target_path = parsed.path
+        if not target_path.endswith("/"):
+            target_path += "/"
+
+        furl = target_path
+        if furl.startswith("/auth"):
+            furl = furl[len("/auth"):]
+
+        post_url = target_path
+        if not post_url.startswith("/auth"):
+            post_url = "/auth" + post_url
+
+        data = {
+            "op": "vlso",
+            "furl": furl,
+            "kolize": "pr" if overwrite else "er",
+            "info": "1",
+            "lang": "en",
+            "jmeno_souboru_0": filename,
+            "nazev_0": title,
+            "popis_0": description.strip(),
+        }
+
+        files = {
+            "FILE_0": (filename, file_bytes, mime_type),
+        }
+
+        resp = self._post(post_url, data=data, files=files)
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required for homework submission.")
+
+        try:
+            res_json = resp.json()
+            if res_json.get("chyba"):
+                raise ValueError(f"IS MU upload rejected: {res_json['chyba']}")
+            return {
+                "success": True,
+                "vault_url": vault_url_or_path,
+                "furl": furl,
+                "filename": filename,
+                "file_size_bytes": len(file_bytes),
+                "display_name": title,
+                "server_response": res_json,
+                "message": f"Successfully submitted '{filename}' to '{furl}'.",
+            }
+        except json.JSONDecodeError:
+            if "chyba" in resp.text.lower() or resp.status_code >= 400:
+                raise ValueError(f"IS MU upload error (HTTP {resp.status_code}): {resp.text[:300]}")
+            return {
+                "success": True,
+                "vault_url": vault_url_or_path,
+                "furl": furl,
+                "filename": filename,
+                "file_size_bytes": len(file_bytes),
+                "display_name": title,
+                "message": f"Submitted '{filename}' to '{furl}' (HTTP {resp.status_code}).",
+            }
+
+    def send_student_email(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        cc: str = "",
+        bcc: str = "",
+        attachment_path: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Sends an email from the student's university account (/auth/mail/) with optional attachments.
+        
+        Args:
+            to: Recipient email address or UČO (e.g. '410452@mail.muni.cz' or '410452').
+            subject: Email subject header.
+            body: Email body text.
+            cc: Optional CC recipients.
+            bcc: Optional BCC recipients.
+            attachment_path: Optional local path to file attachment.
+        """
+        import mimetypes
+
+        if not to.strip():
+            raise ValueError("Recipient 'to' cannot be empty.")
+        if not subject.strip():
+            raise ValueError("Email 'subject' cannot be empty.")
+
+        get_resp = self._get("/auth/mail/?lang=en;new_mail=1")
+        if "login" in str(get_resp.url) or "muni.islogin.cz" in str(get_resp.url):
+            raise PermissionError("Authentication required to send university email.")
+
+        soup = BeautifulSoup(get_resp.text, "html.parser")
+        form = soup.find("form", id="send_form")
+        if not form:
+            raise RuntimeError("Could not find email composition form on /auth/mail/.")
+
+        attach_folder = ""
+        attach_folder_sc = ""
+        folder_id = ""
+        sent_folder = ""
+
+        af_inp = form.find("input", attrs={"name": "attach_folder"})
+        if af_inp:
+            attach_folder = af_inp.get("value", "")
+
+        af_sc_inp = form.find("input", attrs={"name": "attach_folder_sc"})
+        if af_sc_inp:
+            attach_folder_sc = af_sc_inp.get("value", "")
+
+        fid_inp = form.find("input", attrs={"name": "folder_id"})
+        if fid_inp:
+            folder_id = fid_inp.get("value", "")
+
+        sf_inp = form.find("input", attrs={"name": "sent_folder"})
+        if sf_inp:
+            sent_folder = sf_inp.get("value", "")
+
+        data = {
+            "to": to.strip(),
+            "cc": cc.strip(),
+            "bcc": bcc.strip(),
+            "reply-to": "",
+            "subject": subject.strip(),
+            "body": body,
+            "send": "Send",
+            "sent_folder": sent_folder,
+            "attach_folder": attach_folder,
+            "attach_folder_sc": attach_folder_sc,
+            "message": "1",
+            "folder_id": folder_id,
+            "new_mail": "1",
+            "get-old-attach": "1",
+            "lang": "en",
+            "dummy": "1",
+        }
+
+        files = None
+        attachment_name = None
+        if attachment_path:
+            att_p = Path(attachment_path).expanduser().resolve()
+            if not att_p.is_file():
+                raise FileNotFoundError(f"Attachment file not found: {attachment_path}")
+            attachment_name = att_p.name
+            m_type, _ = mimetypes.guess_type(str(att_p))
+            files = {
+                "attach": (attachment_name, att_p.read_bytes(), m_type or "application/octet-stream")
+            }
+
+        post_resp = self._post("/auth/mail/?lang=en;new_mail=1", data=data, files=files)
+        if "login" in str(post_resp.url) or "muni.islogin.cz" in str(post_resp.url):
+            raise PermissionError("Session expired during email dispatch.")
+
+        resp_soup = BeautifulSoup(post_resp.text, "html.parser")
+        error_div = resp_soup.find("div", class_=re.compile(r"chyba|alert|error", re.I))
+        if error_div and "chyba" in error_div.get("class", []):
+            err_text = error_div.get_text(" ", strip=True)
+            raise ValueError(f"IS MU rejected email dispatch: {err_text}")
+
+        return {
+            "success": True,
+            "to": to.strip(),
+            "cc": cc.strip() if cc else None,
+            "bcc": bcc.strip() if bcc else None,
+            "subject": subject.strip(),
+            "attachment": attachment_name,
+            "message": "Email successfully dispatched through IS MU mailer.",
         }

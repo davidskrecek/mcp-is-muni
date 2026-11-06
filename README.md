@@ -17,7 +17,8 @@ Allows LLM assistants (Claude, Cursor, Antigravity, Windsurf) to access enrolled
 | **`list_study_materials`** | `course_code`, `folder_path` | Browses course study materials repository (`učební materiály`), folders, and files. |
 | **`read_study_material`** | `url`, `max_pages`, `max_chars` | Downloads and extracts clean text from PDFs (slides, assignments), HTML, or plain text. |
 | **`get_interactive_syllabus`**| `course_code`, `faculty`, `semester` | Fetches week-by-week interactive syllabus (`interaktivní osnova`) and topics. |
-| **`get_homework_vaults`** | `course_code` | Checks homework submission boxes (`odevzdávárny`), instructions, and deadlines. |
+| **`get_homework_vaults`** | `course_code`, `semester` _(opt)_, `faculty` _(opt)_ | Checks homework submission boxes (`odevzdávárny`), instructions, and folder URLs. |
+| **`submit_homework_file`** | `vault_url_or_path`, `file_path`, `display_name`, `description`, `overwrite` | Uploads and submits an assignment file into an IS MU homework vault (`odevzdávárna`). |
 | **`get_student_timetable`** | _none_ | Retrieves personal weekly lecture, lab, and seminar timetable. |
 | **`get_grades_and_notebooks`**| `course_code` _(optional)_ | Fetches test points, homework scores, and grades from `poznámkové bloky`. |
 | **`get_student_notices`** | `limit` | Reads announcements from the student noticeboard (`nástěnka`). |
@@ -29,6 +30,7 @@ Allows LLM assistants (Claude, Cursor, Antigravity, Windsurf) to access enrolled
 | **`get_exam_dates`** | `term_id` _(optional)_, `study_id` _(optional)_ | Upcoming examination dates, midterm test slots, enrolled reservations, capacities, and deadlines. |
 | **`get_student_emails`** | `folder` _(optional)_, `limit` _(optional)_ | Lists university email messages (`/auth/mail/`) with unread flags, sender, date, and subject. |
 | **`read_email_message`** | `mail_id` | Full email reading: message headers, sender, recipients, date, subject, body, and download link. |
+| **`send_student_email`** | `to`, `subject`, `body`, `cc`, `bcc`, `attachment_path` | Composes and sends an email from the student's university account with attachments. |
 
 ---
 

@@ -124,15 +124,45 @@ def get_interactive_syllabus(course_code: str, faculty: str = "", semester: str 
 
 
 @mcp.tool()
-def get_homework_vaults(course_code: str) -> str:
+def get_homework_vaults(course_code: str, semester: str = "podzim2026", faculty: str = "fi") -> str:
     """
-    List homework submission vaults (odevzdávárny), assignment instructions, and deadlines for a course.
+    List homework submission vaults (odevzdávárny), assignment instructions, and direct upload URLs for a course.
     
     Args:
-        course_code: Course code (e.g. 'PV281').
+        course_code: Course code (e.g. 'PA103', 'PV281', 'PV179').
+        semester: Semester slug (default 'podzim2026').
+        faculty: Faculty slug (default 'fi').
     """
-    vaults = client.get_homework_vaults(course_code)
+    vaults = client.get_homework_vaults(course_code, semester=semester, faculty=faculty)
     return json.dumps(vaults, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def submit_homework_file(
+    vault_url_or_path: str,
+    file_path: str,
+    display_name: str = "",
+    description: str = "",
+    overwrite: bool = True,
+) -> str:
+    """
+    Upload and submit an assignment file into an IS MU homework vault (odevzdávárna) or folder.
+    
+    Args:
+        vault_url_or_path: Target folder URL or relative path (e.g. '/auth/el/fi/podzim2026/PA103/ode/design_patterns/').
+        file_path: Local filesystem path to the file to upload.
+        display_name: Optional custom title/name of the file in IS MU (defaults to filename).
+        description: Optional note/comment for the uploaded submission.
+        overwrite: If True, overwrites existing file with same name. If False, reports error on collision.
+    """
+    result = client.submit_homework_file(
+        vault_url_or_path=vault_url_or_path,
+        file_path=file_path,
+        display_name=display_name,
+        description=description,
+        overwrite=overwrite,
+    )
+    return json.dumps(result, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -271,6 +301,37 @@ def read_email_message(mail_id: str) -> str:
     """
     msg = client.read_email_message(mail_id=mail_id)
     return json.dumps(msg, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def send_student_email(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    bcc: str = "",
+    attachment_path: str = "",
+) -> str:
+    """
+    Compose and send an email from student's university account (/auth/mail/) with optional attachments.
+    
+    Args:
+        to: Recipient email address or UČO (e.g. '410452@mail.muni.cz' or '410452').
+        subject: Email subject header.
+        body: Plain text email body.
+        cc: Optional CC recipients.
+        bcc: Optional BCC recipients.
+        attachment_path: Optional local path to file to attach.
+    """
+    result = client.send_student_email(
+        to=to,
+        subject=subject,
+        body=body,
+        cc=cc,
+        bcc=bcc,
+        attachment_path=attachment_path,
+    )
+    return json.dumps(result, indent=2, ensure_ascii=False)
 
 
 def main():
