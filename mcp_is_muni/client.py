@@ -627,3 +627,195 @@ class ISMuniClient:
                     })
 
         return results[:25]
+
+    def _discover_study_id(self) -> str:
+        """Find active study ID from student portal."""
+        r = self.session.get("/auth/student/?lang=en")
+        m = re.search(r"studium=(\d+)", r.text)
+        return m.group(1) if m else ""
+
+    def get_study_progress_check(self, study_id: str = "") -> Dict[str, Any]:
+        """
+        Performs official degree audit check (Kontrola průchodu studiem) using assigned monitoring templates.
+        Categorizes requirements into completed, enrolled/in-progress, and missing courses by group.
+        """
+        if not study_id:
+            study_id = self._discover_study_id()
+        if not study_id:
+            raise ValueError("Could not determine student study ID (studium).")
+
+        form_url = f"/auth/student/moje_kontrola_studia?studium={study_id};lang=en"
+        r_form = self.session.get(form_url)
+        if "login" in str(r_form.url) or "muni.islogin.cz" in str(r_form.url):
+            raise PermissionError("Authentication required for study progress check.")
+
+        soup_form = BeautifulSoup(r_form.text, "html.parser")
+        form = soup_form.find("form", action=re.compile(r"moje_kontrola_studia"))
+
+        post_data: Dict[str, str] = {}
+        if form:
+            for inp in form.find_all("input"):
+                n = inp.get("name")
+                v = inp.get("value", "")
+                if n:
+                    post_data[n] = v
+            post_data["sabprokon_tl"] = "Check my studies"
+        else:
+            post_data = {
+                "studium": study_id,
+                "lang": "en",
+                "sabprokon_tl": "Check my studies",
+            }
+
+        r_post = self.session.post(form_url, data=post_data)
+        soup_res = BeautifulSoup(r_post.text, "html.parser")
+
+        # Find the monitoring template results block
+        template_node = soup_res.find(string=re.compile(r"The courses completed are marked green", re.I))
+        if not template_node:
+            raise RuntimeError("Could not find degree audit results in response.")
+
+        p_container = soup_res.find(string=re.compile(r"Povinné předměty", re.I))
+        if not p_container:
+            p_container = template_node.find_parent("form") or soup_res.find("main")
+        else:
+            p_container = p_container.find_parent("p")
+
+        lines = []
+        curr = []
+        for child in p_container.children:
+            if child.name == "br":
+                lines.append(curr)
+                curr = []
+            else:
+                curr.append(child)
+        if curr:
+            lines.append(curr)
+
+        groups: List[Dict[str, Any]] = []
+        current_group: Optional[Dict[str, Any]] = None
+
+        for line in lines:
+            line_soup = BeautifulSoup("".join(str(c) for c in line), "html.parser")
+            txt = line_soup.get_text(" ", strip=True)
+            if not txt:
+                continue
+
+            status = "unknown"
+            if line_soup.find("font", color="green") or txt.startswith("o "):
+                status = "completed"
+            elif line_soup.find("span", class_="maybe") or txt.startswith("? "):
+                status = "enrolled"
+            elif line_soup.find("font", color="red") or txt.startswith("x "):
+                status = "missing"
+
+            a = line_soup.find("a", href=re.compile(r"/course/|/predmet"))
+            if a:
+                course_code = a.get_text(strip=True)
+                desc = txt
+                for prefix in ["o ", "x ", "? "]:
+                    if desc.startswith(prefix):
+                        desc = desc[len(prefix):]
+                if desc.startswith(course_code):
+                    desc = desc[len(course_code):].strip()
+
+                course_item = {
+                    "code": course_code,
+                    "status": status,
+                    "description": desc,
+                    "url": urljoin(BASE_URL, a["href"]),
+                }
+                if current_group:
+                    current_group["courses"].append(course_item)
+            else:
+                clean_title = re.sub(r"^[ox\?]\s*", "", txt)
+                if any(x in clean_title.lower() for x in ["check your studies", "templates assigned", "select one or more"]):
+                    continue
+                current_group = {
+                    "group_name": clean_title,
+                    "status": status,
+                    "courses": [],
+                }
+                groups.append(current_group)
+
+        # Summary count of missing vs completed groups
+        missing_count = sum(1 for g in groups if g["status"] == "missing")
+        completed_count = sum(1 for g in groups if g["status"] == "completed")
+
+        return {
+            "study_id": study_id,
+            "groups_total": len(groups),
+            "groups_completed": completed_count,
+            "groups_pending": missing_count,
+            "groups": groups,
+        }
+
+    def get_study_credit_summary(self, study_id: str = "") -> Dict[str, Any]:
+        """
+        Retrieves earned credits, grade averages, and enrolled credits per semester.
+        """
+        if not study_id:
+            study_id = self._discover_study_id()
+        if not study_id:
+            raise ValueError("Could not determine student study ID (studium).")
+
+        url = f"/auth/student/moje_znamky?studium={study_id};vsob=1;lang=en"
+        resp = self.session.get(url)
+        if "login" in str(resp.url) or "muni.islogin.cz" in str(resp.url):
+            raise PermissionError("Authentication required for grades and credit summary.")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        semesters: List[Dict[str, Any]] = []
+        current_sem: Optional[Dict[str, Any]] = None
+
+        for tr in soup.find_all("tr"):
+            span = tr.find("span", class_="table_obdobi_nadpis")
+            if span:
+                current_sem = {
+                    "semester": span.get_text(strip=True),
+                    "credits_earned": 0,
+                    "credits_enrolled": 0,
+                    "courses": [],
+                }
+                semesters.append(current_sem)
+                continue
+
+            if current_sem:
+                tds = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
+                if len(tds) >= 4 and not any(k in tds[0].lower() for k in ["course", "předmět", "grade average", "studijní průměr"]):
+                    name_code = tds[0]
+                    cr_str = tds[1]
+                    eval_str = tds[3]
+                    try:
+                        cr = int(cr_str)
+                    except ValueError:
+                        cr = 0
+
+                    is_completed = any(
+                        eval_str.startswith(f"Evaluation: {g}") or eval_str.startswith(f"Evaluation:{g}")
+                        for g in ["A", "B", "C", "D", "E", "Z", "P", "FC", "FE"]
+                    )
+                    if is_completed:
+                        current_sem["credits_earned"] += cr
+                    else:
+                        current_sem["credits_enrolled"] += cr
+
+                    current_sem["courses"].append({
+                        "course": name_code,
+                        "credits": cr,
+                        "evaluation": eval_str,
+                        "completed": is_completed,
+                    })
+
+        total_earned = sum(s["credits_earned"] for s in semesters)
+        total_enrolled = sum(s["credits_enrolled"] for s in semesters)
+
+        return {
+            "study_id": study_id,
+            "total_credits_earned": total_earned,
+            "current_credits_enrolled": total_enrolled,
+            "total_credits_expected_after_term": total_earned + total_enrolled,
+            "degree_target_credits": 120,
+            "credits_remaining_for_degree": max(0, 120 - (total_earned + total_enrolled)),
+            "semesters": semesters,
+        }

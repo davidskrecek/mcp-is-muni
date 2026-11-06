@@ -182,6 +182,32 @@ def search_is(query: str) -> str:
     return json.dumps(results, indent=2, ensure_ascii=False)
 
 
+@mcp.tool()
+def get_study_progress_check(study_id: str = "") -> str:
+    """
+    Perform official degree audit check (Kontrola průchodu studiem) using assigned monitoring templates.
+    Returns status of all required course groups, completed courses, enrolled courses, and missing requirements.
+    
+    Args:
+        study_id: Optional student study identifier (e.g. '1234567'). Auto-discovered if omitted.
+    """
+    audit = client.get_study_progress_check(study_id=study_id)
+    return json.dumps(audit, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def get_study_credit_summary(study_id: str = "") -> str:
+    """
+    Retrieve student's academic credit progress, earned credits per semester, currently enrolled credits,
+    and remaining credits required for graduation.
+    
+    Args:
+        study_id: Optional student study identifier (e.g. '1234567'). Auto-discovered if omitted.
+    """
+    summary = client.get_study_credit_summary(study_id=study_id)
+    return json.dumps(summary, indent=2, ensure_ascii=False)
+
+
 def main():
     mcp.run()
 

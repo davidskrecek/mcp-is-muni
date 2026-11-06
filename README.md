@@ -22,6 +22,8 @@ Allows LLM assistants (Claude, Cursor, Antigravity, Windsurf) to access enrolled
 | **`get_grades_and_notebooks`**| `course_code` _(optional)_ | Fetches test points, homework scores, and grades from `poznámkové bloky`. |
 | **`get_student_notices`** | `limit` | Reads announcements from the student noticeboard (`nástěnka`). |
 | **`search_is`** | `query` | Queries people, courses, documents, and publications across IS MU. |
+| **`get_study_progress_check`** | `study_id` _(optional)_ | Official degree audit check (*Kontrola průchodu studiem*). Reports status of all required course groups, completed/enrolled/missing courses. |
+| **`get_study_credit_summary`** | `study_id` _(optional)_ | Academic credit progress, earned credits per semester, currently enrolled credits, and remaining credits to graduate. |
 
 ---
 
